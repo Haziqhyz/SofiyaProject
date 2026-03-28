@@ -1,1 +1,268 @@
 
+<?php
+// Database configuration
+define('DB_HOST', 'localhost');
+define('DB_USER', 'root');
+define('DB_PASS', '');
+define('DB_NAME', 'sofiya_db');
+
+// Create connection
+$conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+
+// Check connection
+if ($conn->connect_error) {
+    die(json_encode(['success' => false, 'message' => 'Database connection failed: ' . $conn->connect_error]));
+}
+
+// Set charset to utf8
+$conn->set_charset("utf8");
+
+// Create table if not exists
+$createTableSQL = "CREATE TABLE IF NOT EXISTS images (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    image_date DATE NOT NULL,
+    image_filename VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)";
+
+if (!$conn->query($createTableSQL)) {
+    error_log("Error creating table: " . $conn->error);
+}
+?>
+
+<?php
+require_once 'config.php';
+
+header('Content-Type: application/json');
+
+$data = json_decode(file_get_contents('php://input'), true);
+
+if (empty($data['id'])) {
+    echo json_encode(['success' => false, 'message' => 'Missing image ID']);
+    exit;
+}
+
+$id = (int)$data['id'];
+
+// Get filename before deleting from database
+$sql = "SELECT image_filename FROM images WHERE id = $id";
+$result = $conn->query($sql);
+
+if ($result->num_rows === 0) {
+    echo json_encode(['success' => false, 'message' => 'Image not found']);
+    exit;
+}
+
+$row = $result->fetch_assoc();
+$filename = $row['image_filename'];
+
+// Delete from database
+$sql = "DELETE FROM images WHERE id = $id";
+
+if ($conn->query($sql) === TRUE) {
+    // Delete file
+    $filepath = 'uploads/' . $filename;
+    if (file_exists($filepath)) {
+        unlink($filepath);
+    }
+    echo json_encode(['success' => true, 'message' => 'Image deleted successfully']);
+} else {
+    echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+}
+
+$conn->close();
+?>
+
+<?php
+require_once 'config.php';
+
+// Check if TCPDF is installed, if not show instructions
+if (!file_exists('../../plugins/tcpdf/tcpdf.php')) {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'message' => 'TCPDF library not found. Please install it first.']);
+    exit;
+}
+
+require_once '../../plugins/tcpdf/tcpdf.php';
+
+header('Content-Type: application/pdf');
+header('Content-Disposition: attachment; filename="image-report.pdf"');
+
+class MYPDF extends TCPDF {
+    public function Header() {
+        $this->SetFont('helvetica', 'B', 16);
+        $this->Cell(0, 10, 'Image Report', 0, 1, 'C');
+        $this->SetFont('helvetica', '', 11);
+        $this->Cell(0, 5, 'Generated on: ' . date('Y-m-d H:i:s'), 0, 1, 'C');
+        $this->Ln(5);
+    }
+
+    public function Footer() {
+        $this->SetY(-15);
+        $this->SetFont('helvetica', 'I', 8);
+        $this->Cell(0, 10, 'Page ' . $this->getAliasNumPage() . '/' . $this->getAliasNbPages(), 0, 0, 'C');
+    }
+}
+
+// Get all images from database
+$sql = "SELECT id, title, image_date, image_filename FROM images ORDER BY created_at DESC";
+$result = $conn->query($sql);
+
+// Create PDF object
+$pdf = new MYPDF(PDF_PAGE_ORIENTATION, PDF_PAGE_UNIT, PDF_PAGE_FORMAT, true, 'UTF-8', false);
+$pdf->SetDefaultMonospacedFont(PDF_FONT_MONOSPACED);
+$pdf->SetMargins(10, 30, 10);
+$pdf->SetAutoPageBreak(TRUE, 15);
+
+$pdf->AddPage();
+
+if ($result->num_rows === 0) {
+    $pdf->SetFont('helvetica', '', 12);
+    $pdf->Cell(0, 10, 'No images available', 0, 1, 'C');
+    $pdf->Output('image-report.pdf', 'D');
+    exit;
+}
+
+// Add images to PDF in grid layout (2 columns)
+$imageCount = 0;
+$maxImagesPerPage = 4; // 2x2 grid
+$imagesOnCurrentPage = 0;
+
+$cellWidth = 90; // Width for each image cell (A4 width = 210mm, minus margins)
+$cellHeight = 80; // Height for image
+$startX = 15;
+$startY = 50;
+
+$pdf->SetFont('helvetica', '', 10);
+
+while ($row = $result->fetch_assoc()) {
+    // Create new page if needed
+    if ($imagesOnCurrentPage >= $maxImagesPerPage && $imagesOnCurrentPage > 0) {
+        $pdf->AddPage();
+        $imagesOnCurrentPage = 0;
+    }
+
+    // Calculate position
+    $col = $imagesOnCurrentPage % 2;
+    $isFirstInRow = $imagesOnCurrentPage % 2 == 0;
+    
+    $posX = $startX + ($col * ($cellWidth + 10));
+    $posY = $startY + (floor($imagesOnCurrentPage / 2) * ($cellHeight + 35));
+
+    // Image path
+    $imagePath = 'uploads/' . $row['image_filename'];
+
+    // Add image if file exists
+    if (file_exists($imagePath)) {
+        try {
+            $pdf->Image($imagePath, $posX, $posY, $cellWidth - 5, $cellHeight - 10);
+        } catch (Exception $e) {
+            // If image can't be loaded, skip it
+        }
+    }
+
+    // Add title and date below image
+    $pdf->SetXY($posX, $posY + $cellHeight - 8);
+    $pdf->SetFont('helvetica', 'B', 9);
+    $pdf->MultiCell($cellWidth - 5, 4, $row['title'], 0, 'L');
+    
+    $pdf->SetFont('helvetica', 'I', 8);
+    $pdf->SetX($posX);
+    $pdf->Cell($cellWidth - 5, 4, 'Date: ' . $row['image_date'], 0, 1, 'L');
+
+    $imagesOnCurrentPage++;
+    $imageCount++;
+}
+
+// Close and output PDF
+$pdf->Output('image-report.pdf', 'D');
+
+$conn->close();
+?>
+
+<?php
+require_once 'config.php';
+
+header('Content-Type: application/json');
+
+$sql = "SELECT id, title, image_date, image_filename FROM images ORDER BY created_at DESC";
+$result = $conn->query($sql);
+
+$images = [];
+
+if ($result->num_rows > 0) {
+    while($row = $result->fetch_assoc()) {
+        $images[] = $row;
+    }
+}
+
+echo json_encode(['success' => true, 'images' => $images]);
+
+$conn->close();
+?>
+
+<?php
+require_once 'config.php';
+
+header('Content-Type: application/json');
+
+// Check if request is POST
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    echo json_encode(['success' => false, 'message' => 'Invalid request method']);
+    exit;
+}
+
+// Validate input
+if (empty($_POST['imageTitle']) || empty($_POST['imageDate']) || empty($_FILES['imageFile'])) {
+    echo json_encode(['success' => false, 'message' => 'Missing required fields']);
+    exit;
+}
+
+$title = $conn->real_escape_string($_POST['imageTitle']);
+$date = $conn->real_escape_string($_POST['imageDate']);
+$file = $_FILES['imageFile'];
+
+// Validate file
+$allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+$fileExtension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+
+if (!in_array($fileExtension, $allowedExtensions)) {
+    echo json_encode(['success' => false, 'message' => 'Invalid file type. Only images are allowed']);
+    exit;
+}
+
+if ($file['size'] > 5 * 1024 * 1024) { // 5MB limit
+    echo json_encode(['success' => false, 'message' => 'File size exceeds 5MB limit']);
+    exit;
+}
+
+// Create uploads directory if not exists
+$uploadsDir = 'uploads';
+if (!is_dir($uploadsDir)) {
+    mkdir($uploadsDir, 0755, true);
+}
+
+// Generate unique filename
+$filename = uniqid() . '_' . time() . '.' . $fileExtension;
+$filepath = $uploadsDir . '/' . $filename;
+
+// Move uploaded file
+if (!move_uploaded_file($file['tmp_name'], $filepath)) {
+    echo json_encode(['success' => false, 'message' => 'Failed to save file']);
+    exit;
+}
+
+// Insert into database
+$sql = "INSERT INTO images (title, image_date, image_filename) VALUES ('$title', '$date', '$filename')";
+
+if ($conn->query($sql) === TRUE) {
+    echo json_encode(['success' => true, 'message' => 'Image uploaded successfully', 'id' => $conn->insert_id]);
+} else {
+    // Delete the file if database insert fails
+    unlink($filepath);
+    echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+}
+
+$conn->close();
+?>
